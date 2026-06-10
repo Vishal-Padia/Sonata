@@ -1,6 +1,6 @@
 ### Installation Shenanigans
 
-At first I created a env, and installed basic libraries like torch, torchaudio, etc. But then I tried to run this command:
+At first I created a env, and installed basic libraries like torch, torchaudio, etc. But then I tried to run this command to install the dependencies from zonos repository:
 
 ```bash
 uv pip install --no-build-isolation -e .[compile]
