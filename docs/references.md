@@ -1,0 +1,5 @@
+# References
+
+I mean, I searched "has anyone, anywhere, published fused streaming decode kernels for zonos mamba2-hybrid backbone?", Why am I doing this? because I feel the fastest way to write good kernels is to read someone else's kernels and understand how they work. We can understand things like register allocation, smem layout for SSM state, and other design decisions. By doing so, I think I'll be able to write better kernels and understand the underlying principles of the kernels.
+
+I thought about skipping this step because I didn't think it matters whether someone has wrote something similar or not, because the whole of point of this project is to learn and challenge myself to write good kernels and show that I have the necessary skills to optimize end-to-end. But then claude convinced me to do it anyways because this will teach me a lot and give me reference to look at when I'm stuck.
