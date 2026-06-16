@@ -237,3 +237,15 @@ This is `Mamba2.step(hidden_states, conv_state, ssm_state)` (`mamba2.py:278`), t
 5. **CORRECTION — `ssm_state` is bf16 in the reference, not fp32.** `allocate_inference_cache` (`mamba2.py:351-354`) sets `ssm_dtype = dtype` and Zonos calls `setup_cache(..., dtype=torch.bfloat16)` (`model.py:198`), so the **stored** `ssm_state` (and `conv_state`) is **bf16**. The fp32 only appears *inside* `selective_state_update`, which upcasts the recurrence math to fp32 and writes the result back down to the bf16 state tensor each step. So the plan's "keep state accumulation in fp32" is a prescription for **my new kernel** — persist the state tensor itself in fp32 across steps, going beyond the reference's bf16 round-trip — not a property of the stock code. A is the only tensor the reference forces to fp32 throughout.
 
 
+## DAC Configuration
+
+`third_party/zonos/autoencoder.py` is a DAC wrapper here.
+- `sampling_rate` = 44100Hz
+- `downsampling_factor` = 512 (this is standard, also look at `third_party/zonos/autoencoder.py:19`)
+- `frame_rate` = `sampling_rate / downsampling_factor` = 44100 / 512 = 86.13Hz
+- per-frame budget at 1x RTF = 1 / frame_rate = 1 / 86.13 = 11.16ms/frame
+- `num_codebooks` = 9
+- `current per-frame compute` = 11.6 / 2 = 5.8 ms (a placeholder as of now)
+- `headroom` = 11.6 - 5.8 = 5.8 ms
+
+>The 9 codebooks are emitted with a delay shift: codebook k at AR step t predicts the token for frame t - (k+1) (roll by k+1). The backbone still runs once per AR step and emits all 9 codebook logits in parallel (9 separate heads off the same hidden state). For streaming this means: one backbone step = one frame of progress after the initial n_codebooks prefill steps prime the delay buffer. The per-step budget is therefore the per-frame budget — 11.6 ms — not 11.6/9 ms. The delay pattern only affects how codebooks line up at the boundaries of the sequence (first/last few steps), not the steady-state step rate.
