@@ -219,3 +219,6 @@ __marimo__/
 
 # plan
 the_plan.md
+# profiler traces (large, regenerable)
+docs/op_level_trace.json
+*.trace.json
