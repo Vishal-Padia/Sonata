@@ -243,9 +243,9 @@ This is `Mamba2.step(hidden_states, conv_state, ssm_state)` (`mamba2.py:278`), t
 - `sampling_rate` = 44100Hz
 - `downsampling_factor` = 512 (this is standard, also look at `third_party/zonos/autoencoder.py:19`)
 - `frame_rate` = `sampling_rate / downsampling_factor` = 44100 / 512 = 86.13Hz
-- per-frame budget at 1x RTF = 1 / frame_rate = 1 / 86.13 = 11.16ms/frame
+- per-frame budget at 1x RTF = 1 / frame_rate = 1 / 86.13 = 11.61ms/frame
 - `num_codebooks` = 9
-- `current per-frame compute` = 11.6 / 2 = 5.8 ms (a placeholder as of now)
-- `headroom` = 11.6 - 5.8 = 5.8 ms
+- `current per-frame compute` = **10.07 ms wall / 9.00 ms GPU** per step, measured on A10G (sm86) — see `docs/baseline_per_block.md`.
+- `headroom` = 11.61 - 10.07 = **1.54 ms/frame** at 1× → **RTF 1.15×**, backbone decode only (vocode not yet included)
 
 >The 9 codebooks are emitted with a delay shift: codebook k at AR step t predicts the token for frame t - (k+1) (roll by k+1). The backbone still runs once per AR step and emits all 9 codebook logits in parallel (9 separate heads off the same hidden state). For streaming this means: one backbone step = one frame of progress after the initial n_codebooks prefill steps prime the delay buffer. The per-step budget is therefore the per-frame budget — 11.6 ms — not 11.6/9 ms. The delay pattern only affects how codebooks line up at the boundaries of the sequence (first/last few steps), not the steady-state step rate.
