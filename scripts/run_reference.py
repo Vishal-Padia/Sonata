@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torchaudio
 from zonos.model import Zonos
@@ -6,6 +7,11 @@ from zonos.utils import DEFAULT_DEVICE as device
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--seed", type=int, default=421, help="RNG seed; the golden contract pins 421")
+parser.add_argument("--out", default="baseline.wav")
+args = parser.parse_args()
 
 _OriginalMelSpec = torchaudio.transforms.MelSpectrogram
 class _DeviceSafeMelSpec(_OriginalMelSpec):
@@ -20,7 +26,8 @@ class _DeviceSafeMelSpec(_OriginalMelSpec):
             self.to(outer_device)
 torchaudio.transforms.MelSpectrogram = _DeviceSafeMelSpec
 
-torch.manual_seed(421)
+torch.manual_seed(args.seed)
+print(f"run_reference: seed={args.seed} device={device}")
 
 model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-hybrid", device=device)
 
@@ -37,4 +44,5 @@ conditioning = model.prepare_conditioning(cond)
 
 codes = model.generate(conditioning)
 wav_out = model.autoencoder.decode(codes).cpu()
-torchaudio.save("baseline.wav", wav_out[0], model.autoencoder.sampling_rate)
+torchaudio.save(args.out, wav_out[0], model.autoencoder.sampling_rate)
+print(f"run_reference: wrote {args.out} ({wav_out.shape[-1]} samples @ {model.autoencoder.sampling_rate} Hz)")
