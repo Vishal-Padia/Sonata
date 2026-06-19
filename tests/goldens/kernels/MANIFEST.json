@@ -1,0 +1,22 @@
+{
+  "causal_conv1d_update": {
+    "file": "causal_conv1d_update.pt",
+    "sha256": "26e6553899ccf49be3d1630069903520ebaa27473f19bb99e9adf5e05af43350"
+  },
+  "layer_norm_fn": {
+    "file": "layer_norm_fn.pt",
+    "sha256": "e084393103121129a3f70fffe40cb1469152a822aa83032b76a9536d28e6d3a2"
+  },
+  "layer_norm_fn_exit": {
+    "file": "layer_norm_fn_exit.pt",
+    "sha256": "a369cce0844138e5b7c65f42fed3e3672716d55f6491d46aad4bc34bd6b308e5"
+  },
+  "rmsnorm_gated": {
+    "file": "rmsnorm_gated.pt",
+    "sha256": "4476b4f434bdcb0218b76d68029ecac7f1a3d834bec14831430fdd3f31a4cb49"
+  },
+  "selective_state_update": {
+    "file": "selective_state_update.pt",
+    "sha256": "7e101c0a63aa83e3d11942e04867b853c6ee8d460b6141cde22dd4827b621242"
+  }
+}

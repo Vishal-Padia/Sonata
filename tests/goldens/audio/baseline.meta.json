@@ -1,0 +1,12 @@
+{
+  "cuda": "12.8",
+  "gpu": "NVIDIA A10G",
+  "libs": {
+    "causal_conv1d": "1.6.2.post1",
+    "mamba_ssm": "2.3.2.post1",
+    "torch": "2.8.0+cu128",
+    "torchaudio": "2.8.0+cu128"
+  },
+  "mel_cfg_sr": 16000,
+  "seed": 421
+}
