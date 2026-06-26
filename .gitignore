@@ -222,3 +222,6 @@ the_plan.md
 # profiler traces (large, regenerable)
 docs/op_level_trace.json
 *.trace.json
+
+# quant experiment candidate audio (regenerable)
+cand_*.wav
