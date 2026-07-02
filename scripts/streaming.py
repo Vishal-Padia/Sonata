@@ -106,8 +106,12 @@ def stream_frames(
         # codebook k lives at delayed position (i + k + 1) -- exactly one column
         # of revert_delay_pattern. torch.stack copies, so the yielded frame is a
         # frozen snapshot (a handed-out frame never changes later).
+        # Guard `offset < T`: if generation runs to max_steps WITHOUT EOS (e.g. a
+        # short warmup run), offset walks to the buffer end and (i + NQ) = offset
+        # would index past it. EOS-terminated runs never reach this; the guard
+        # just makes short/no-EOS runs safe instead of an IndexError.
         i = offset - NQ
-        if i >= 0:
+        if i >= 0 and offset < delayed_codes.shape[2]:
             frame_tokens = torch.stack(
                 [delayed_codes[:, k, i + k + 1] for k in range(NQ)], dim=1
             )  # [batch, NQ]

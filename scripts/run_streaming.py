@@ -127,25 +127,57 @@ def cmd_check_vocode(args):
 def cmd_e2e(args):
     model = load_model()
     context, tail = measure_receptive_field(model)
-    print(f"CONTEXT={context} frames, TAIL={tail} samples, chunk={CHUNK_FRAMES} frames")
+    print(f"CONTEXT={context} frames, TAIL={tail} samples, chunk={CHUNK_FRAMES} frames", flush=True)
     conditioning = standard_conditioning(model)
 
+    # Warmup: the FIRST backbone step pays one-time cuBLAS/cuDNN algo selection +
+    # CUDA-graph capture (measure_receptive_field only warmed the DAC). Without
+    # this, "TTFA" is dominated by ~7s of cold init, not real streaming latency.
+    # Safe now that stream_frames guards the no-EOS overflow.
+    print("warmup (priming backbone + graph; discarded)...", flush=True)
+    for _ in stream_and_vocode(stream_frames(model, conditioning, max_new_tokens=64),
+                               model, CHUNK_FRAMES, context, tail):
+        pass
+    torch.cuda.synchronize()
+
+    # --- timed interleaved streaming run (TTFA + end-to-end streaming RTF) ---
+    print("streaming (timed)...", flush=True)
     t_go = time.perf_counter()
     frame_gen = stream_frames(model, conditioning, max_new_tokens=MAX_NEW_TOKENS)
     vs = {}
     chunks = []
     for i, wav_chunk in enumerate(stream_and_vocode(frame_gen, model, CHUNK_FRAMES, context, tail, session=vs)):
         if i == 0:
-            print(f"TTFA (single-shot; NOT yet p50/p90 over >=100 runs): {(time.perf_counter() - t_go) * 1000:.1f} ms")
+            print(f"TTFA (warm, single-shot; NOT yet p50/p90 over >=100 runs): "
+                  f"{(time.perf_counter() - t_go) * 1000:.1f} ms", flush=True)
         chunks.append(wav_chunk.cpu())
-
     total = time.perf_counter() - t_go
     full = torch.cat(chunks, dim=-1)
     dur = full.shape[-1] / model.autoencoder.sampling_rate
-    print(f"frames={vs['n_frames']}  chunks={len(chunks)}  audio={dur:.3f}s  wall={total:.3f}s")
-    print(f"end-to-end streaming RTF (generate+vocode, distinct from the decode-only 1.15x): {dur / total:.2f}x")
     torchaudio.save(args.out, full[0], model.autoencoder.sampling_rate)
-    print(f"wrote {args.out}")
+
+    # --- attribution: split the clock into generate vs vocode (both warm) ---
+    # Is RTF < 1 the overlap-save recompute tax, or a decode regression? Time each
+    # phase alone. generate-only drains stream_frames (no vocode); vocode-only
+    # runs chunked_decode over the resulting codes.
+    sess = {}
+    t = time.perf_counter()
+    for _ in stream_frames(model, conditioning, max_new_tokens=MAX_NEW_TOKENS, session=sess):
+        pass
+    torch.cuda.synchronize()
+    t_gen = time.perf_counter() - t
+    codes = revert_delay_pattern(sess["delayed_codes"])[..., : sess["n_frames_yielded"]]
+    codes = codes.masked_fill(codes >= 1024, 0)
+    t = time.perf_counter()
+    chunked_decode(model, codes, chunk_frames=CHUNK_FRAMES, context=context, tail=tail)
+    torch.cuda.synchronize()
+    t_voc = time.perf_counter() - t
+
+    print(f"frames={vs['n_frames']}  chunks={len(chunks)}  audio={dur:.3f}s  wall={total:.3f}s", flush=True)
+    print(f"end-to-end streaming RTF (generate+vocode; distinct from decode-only 1.15x): {dur / total:.2f}x", flush=True)
+    print(f"  split: generate-only {t_gen:.3f}s ({dur / t_gen:.2f}x)   "
+          f"vocode-only {t_voc:.3f}s ({dur / t_voc:.2f}x)", flush=True)
+    print(f"wrote {args.out}", flush=True)
 
 
 def main():
