@@ -1,4 +1,5 @@
 import argparse
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -34,6 +35,13 @@ SEED = 421
 TEXT = "The kernels run on time, frame by frame."
 MAX_NEW_TOKENS = 256
 CHUNK_FRAMES = 20  # ~232 ms of new audio/chunk; must clear TAIL (~10.3 frames) with margin
+
+# bench: sweep chunk sizes. Min feasible chunk = tail_frames+1 = 12 (stream_and_vocode
+# asserts chunk > tail_frames, and tail=5254 -> ceil/512 = 11), NOT the 8-step delay floor.
+SWEEP_CHUNKS = [12, 14, 16, 18, 20]
+TTFA_RUNS = 100   # early-stop runs per chunk (stop at first chunk) -> TTFA p50/p90
+FULL_RUNS = 6     # full runs per chunk -> inter-chunk latency + RTF
+FRAME_MS = 1000.0 / (44100.0 / 512.0)  # 11.61 ms per-frame realtime budget
 
 
 def load_model():
@@ -180,6 +188,91 @@ def cmd_e2e(args):
     print(f"wrote {args.out}", flush=True)
 
 
+def _pct(xs, q):
+    return statistics.quantiles(xs, n=100, method="inclusive")[q - 1] if len(xs) > 1 else xs[0]
+
+
+@torch.inference_mode()
+def cmd_bench(args):
+    """M3: TTFA-vs-chunk sweep + p50/p90 for TTFA and steady-state inter-chunk
+    latency. Finds the real minimum TTFA (the knee) instead of quoting one warm
+    shot at chunk=20, and confirms steady-state stays under the per-frame budget."""
+    model = load_model()
+    context, tail = measure_receptive_field(model)
+    hop = model.autoencoder.dac.config.hop_length
+    sr = model.autoencoder.sampling_rate
+    tail_frames = -(-tail // hop)
+    conditioning = standard_conditioning(model)
+
+    # Pin the delay-pattern floor off the code: frame 0 needs delayed index NQ=9,
+    # of which position 1 is the prefill sample -> 8 decode steps.
+    nq = model.autoencoder.num_codebooks
+    delay_steps = nq - 1
+    print(f"CONTEXT={context}f  TAIL={tail}smp ({tail_frames}f)  budget={FRAME_MS:.2f} ms/frame", flush=True)
+    print(f"delay floor: NQ={nq} delayed positions, position 1 from prefill -> "
+          f"first frame after {delay_steps} decode steps (~{delay_steps * FRAME_MS:.0f} ms); "
+          f"min feasible chunk = {tail_frames + 1}", flush=True)
+
+    # Process warmup once (prime cuBLAS/cuDNN + graph); reset graph so run 1 recaptures.
+    print("warmup...", flush=True)
+    for _ in stream_and_vocode(stream_frames(model, conditioning, max_new_tokens=64),
+                               model, SWEEP_CHUNKS[0], context, tail):
+        pass
+    model._cg_graph = None
+    torch.cuda.synchronize()
+
+    def ttfa_once(chunk):
+        gen = stream_and_vocode(stream_frames(model, conditioning, max_new_tokens=MAX_NEW_TOKENS),
+                                model, chunk, context, tail)
+        t0 = time.perf_counter()
+        next(gen) # first chunk only
+        torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) * 1000.0
+        gen.close()
+        model._cg_graph = None # early-stop skipped stream_frames' reset; force recapture (stale-pointer safety)
+        return dt
+
+    def full_once(chunk):
+        vs = {}
+        gen = stream_and_vocode(stream_frames(model, conditioning, max_new_tokens=MAX_NEW_TOKENS),
+                                model, chunk, context, tail, session=vs)
+        stamps, samples = [], []
+        t0 = time.perf_counter()
+        for wav_chunk in gen:
+            torch.cuda.synchronize()
+            stamps.append(time.perf_counter())
+            samples.append(wav_chunk.shape[-1])
+        total = stamps[-1] - t0
+        audio = sum(samples) / sr
+        # inter-chunk per-frame latency: gap between chunk k-1,k over frames committed in chunk k
+        per_frame = [((stamps[k] - stamps[k - 1]) * 1000.0) / (samples[k] / hop)
+                     for k in range(1, len(stamps))]
+        return audio / total, per_frame  # (RTF, list of per-frame ms)
+
+    rows = []
+    for chunk in SWEEP_CHUNKS:
+        ttfas = [ttfa_once(chunk) for _ in range(TTFA_RUNS)]
+        rtfs, pf = [], []
+        for _ in range(FULL_RUNS):
+            rtf, per_frame = full_once(chunk)
+            rtfs.append(rtf)
+            pf.extend(per_frame)
+        rows.append((chunk, _pct(ttfas, 50), _pct(ttfas, 90),
+                     _pct(pf, 50), _pct(pf, 90), statistics.median(rtfs)))
+        print(f"  chunk={chunk:2d}: TTFA p50={rows[-1][1]:6.1f} p90={rows[-1][2]:6.1f} ms | "
+              f"per-frame p50={rows[-1][3]:5.2f} p90={rows[-1][4]:5.2f} ms (budget {FRAME_MS:.2f}) | "
+              f"RTF={rows[-1][5]:.2f}x", flush=True)
+
+    print(f"\n{'chunk':>5} {'TTFA_p50':>9} {'TTFA_p90':>9} {'pframe_p50':>11} {'pframe_p90':>11} {'RTF':>6} {'sustains':>9}")
+    for chunk, t50, t90, f50, f90, rtf in rows:
+        print(f"{chunk:>5} {t50:>9.1f} {t90:>9.1f} {f50:>11.2f} {f90:>11.2f} {rtf:>6.2f} "
+              f"{'yes' if f90 < FRAME_MS else 'no':>9}")
+    sustaining = [r for r in rows if r[4] < FRAME_MS]  # p90 per-frame under budget
+    knee = min(sustaining, key=lambda r: r[1]) if sustaining else min(rows, key=lambda r: r[1])
+    print(f"\nknee: chunk={knee[0]}  TTFA p50={knee[1]:.1f} ms / p90={knee[2]:.1f} ms  "
+          f"(lowest TTFA that sustains p90 per-frame < {FRAME_MS:.2f} ms)", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Phase 1 streaming pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -188,12 +281,14 @@ def main():
     sub.add_parser("check-vocode")
     e = sub.add_parser("e2e")
     e.add_argument("--out", default="streaming_e2e.wav")
+    sub.add_parser("bench")
     args = ap.parse_args()
     {
         "probe": cmd_probe,
         "check-decode": cmd_check_decode,
         "check-vocode": cmd_check_vocode,
         "e2e": cmd_e2e,
+        "bench": cmd_bench,
     }[args.cmd](args)
 
 
