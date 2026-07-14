@@ -11,9 +11,9 @@ Reproduce: `python kernels/bench_gemv_graph.py` (CUDA-graph timed, the fair numb
 
 `docs/baseline_op_level.md` found the two projection matmuls are ~85% of a Mamba2 decode layer and are bound by reading the weight bytes, not math. cuBLAS is slow at M=1-2 because it runs a GEMM kernel that pads M to a tensor-core tile and wastes the MMA on 1-2 rows. A plain FMA reduction that streams the weight once (no tensor cores) is the right shape for a memory-bound load, so it can beat cuBLAS here.
 
-## The roofline is 482 GB/s, not 600
+## The roofline is measured, not the 600 spec
 
-`bench_gemv.py` measures the achievable HBM ceiling with a copy loop: **482 GB/s (80% of the 600 spec)**. That reframes the headroom. Against 482, cuBLAS is already at ~97% on in_proj and fc1 at M=1, so there is almost nothing to take on the large-N shapes at M=1. The real headroom is small-N (out_proj, where cuBLAS sits at ~72-80%) and the M=2 path. Quoting the 600 spec overstated the opportunity; the measured roof is the honest target.
+The A10G's 600 GB/s is a spec, not what you hit. Measured ceilings: a copy loop does **476 GB/s** (read+write), and a read-only reduction does **520 GB/s**. The GEMV is **read-dominated** (it streams the weight, writes a tiny output), so the honest roofline is the **read-only 520 GB/s**. Against it, cuBLAS is already at ~95%+ on in_proj and fc1, so there is almost nothing to take on the large-N shapes; the real headroom is small-N (out_proj, where cuBLAS sits well below) and the M=2 path. Quoting the 600 spec overstated the opportunity.
 
 ## The kernel
 
@@ -41,13 +41,13 @@ CuTeDSL launches on **stream 0 and then synchronizes** by default (`dsl.py:2771`
 
 M=2 (cfg-decode, the production path). Both paths bf16, numerically PASS (rel err < 5e-2, at the bf16 output-rounding floor):
 
-| shape | cuBLAS | cute_splitk | speedup | % of roof |
+| shape | cuBLAS | cute_splitk | speedup | % of read-only roof (520 GB/s) |
 |---|---|---|---|---|
-| out_proj (2048x4096) | 47.7 µs | **35.1 µs** | **1.36×** | 99% |
-| in_proj (8512x2048) | 73.5 µs | **68.7 µs** | **1.07×** | 106% |
-| fc1 (16384x2048) | 154.8 µs | **129.2 µs** | **1.20×** | 108% |
+| out_proj (2048x4096) | 47.7 µs | **35.1 µs** | **1.36×** | 92% |
+| in_proj (8512x2048) | 73.5 µs | **68.7 µs** | **1.07×** | 98% |
+| fc1 (16384x2048) | 154.8 µs | **129.2 µs** | **1.20×** | 100% |
 
-(>100% of roof because a read-mostly GEMV can exceed the read+write copy ceiling; these are at the practical read-bandwidth limit.)
+(% is against the measured read-only ceiling, the right roofline for a read-dominated GEMV. fc1 sits right at the read-bandwidth limit; out_proj has the most left, which is why it also has the most tail effect from too few blocks.)
 
 M=1 (pure streaming, no cfg) is mixed: `coalesced` wins out_proj (1.08×) and fc1 (1.03×) but the split-K m1 kernel is still scalar and lags, and neither beats cuBLAS on in_proj (already ~98% roof there). Production runs cfg, so M=2 is the path that matters; vectorizing m1 is a loose end for a batch-1-no-cfg regime.
 

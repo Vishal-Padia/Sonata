@@ -19,10 +19,12 @@ PEAK = 600.0
 
 
 def measured_ceiling(nbytes=512 * 1024 * 1024):
-    src = torch.empty(nbytes // 2, device="cuda", dtype=torch.bfloat16)
-    dst = torch.empty_like(src)
-    call = lambda: dst.copy_(src)
-    return graph_time(call, iters=100, warmups=5) and (2 * nbytes) / (graph_time(call) * 1e-6) / 1e9
+    # Read-only ceiling: the GEMV is read-dominated (it streams the weight, writes a
+    # tiny output), so the right roofline is peak READ bandwidth, not the copy loop's
+    # read+write figure. Reporting against read-only keeps the kernel's % <= 100.
+    x = torch.empty(nbytes // 2, device="cuda", dtype=torch.bfloat16)
+    us = graph_time(lambda: x.sum(), iters=200, warmups=10)
+    return nbytes / (us * 1e-6) / 1e9
 
 
 def graph_time(call, iters=300, warmups=5):
@@ -62,8 +64,8 @@ def prep_cute(jit_fn, x, W, y):
 
 
 def main():
-    roof = 482.0  # measured copy ceiling from bench_gemv.py (~80% of 600 spec)
-    print(f"# roofline ~{roof:.0f} GB/s (measured copy ceiling)")
+    roof = measured_ceiling()  # read-only bandwidth ceiling (the GEMV is read-dominated)
+    print(f"# roofline ~{roof:.0f} GB/s (measured read-only ceiling)")
     print(f"{'shape':10} {'M':>2} {'cand':>16} {'kernel us':>10} {'GB/s':>7} {'%roof':>6} {'vs cuBLAS':>10} {'ok':>5}")
     torch.manual_seed(0)
     for name, (N, K) in SHAPES.items():
