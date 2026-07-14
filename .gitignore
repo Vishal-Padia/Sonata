@@ -225,3 +225,7 @@ docs/op_level_trace.json
 
 # quant experiment candidate audio (regenerable)
 cand_*.wav
+
+# GEMV kernel: regenerable audio + pycache
+cute_stream.wav
+__pycache__/
