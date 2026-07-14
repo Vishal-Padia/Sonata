@@ -334,10 +334,40 @@ def measure_floors(name, device):
         print(f"  {n:<12} max={d.max().item():.2e}  mean={d.mean().item():.2e}")
 
 
+def check_gemv(device) -> int:
+    """Regression guard for the CuTeDSL projection GEMV (kernels/gemv.py), live vs
+    cuBLAS and fp32 at the decode shapes (M=2). Matched-reference discipline like the
+    audio gate: recompute the reference, no frozen golden. Gates cute-vs-fp32 (the
+    kernel must stay >= cuBLAS accuracy); reports cute-vs-cuBLAS. Tight tolerance so a
+    future kernel change that silently breaks accuracy fails here, not by ear."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "kernels"))
+    from gemv import candidate_cute_splitk
+
+    TOL = 3e-3  # ~2x the measured cute-vs-fp32 floor (1.66e-3); catches real breakage
+    shapes = {"in_proj": (8512, 2048), "out_proj": (2048, 4096),
+              "attn fc1": (16384, 2048), "attn fc2": (2048, 8192)}
+    g = torch.Generator(device=device).manual_seed(SEED)
+    rms = lambda a: (a.float() ** 2).mean().sqrt().item()
+    print(f"GEMV regression (M=2, cute vs cuBLAS/fp32; PASS if cute-vs-fp32 < {TOL:.0e} rel-RMS)")
+    failed = 0
+    for name, (N, K) in shapes.items():
+        x = _gen(device, g, (2, K))
+        W = _gen(device, g, (N, K))
+        ref = x.float() @ W.float().t()
+        r_fp32 = rms(candidate_cute_splitk(x, W).float() - ref) / rms(ref)
+        r_cublas = rms(candidate_cute_splitk(x, W).float() - (x @ W.t()).float()) / rms(ref)
+        ok = r_fp32 < TOL
+        failed += not ok
+        print(f"  {name:<10} cute-vs-fp32={r_fp32:.2e}  cute-vs-cuBLAS={r_cublas:.2e}  {'PASS' if ok else 'FAIL'}")
+    print(f"\n{'GEMV GREEN' if failed == 0 else f'{failed} GEMV FAILURE(S)'}")
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--regen-goldens", action="store_true")
     ap.add_argument("--measure-floors", action="store_true")
+    ap.add_argument("--gemv", action="store_true", help="regression-check the CuTeDSL projection GEMV vs cuBLAS/fp32")
     ap.add_argument("--force", action="store_true", help="regen even under library drift (then bump PINNED_LIBS)")
     ap.add_argument("--op", default=None, help="single op by name")
     args = ap.parse_args()
@@ -353,6 +383,8 @@ def main():
         for name in targets:
             measure_floors(name, device)
         return 0
+    if args.gemv:
+        return 1 if check_gemv(device) else 0
 
     failed = 0
     for name in targets:
