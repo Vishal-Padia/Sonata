@@ -44,9 +44,18 @@ FULL_RUNS = 6     # full runs per chunk -> inter-chunk latency + RTF
 FRAME_MS = 1000.0 / (44100.0 / 512.0)  # 11.61 ms per-frame realtime budget
 
 
+_PATCH_GEMV = False  # set by --patch: swap projections to the CuTe GEMV after load
+
+
 def load_model():
     torch.manual_seed(SEED)
-    return Zonos.from_pretrained("Zyphra/Zonos-v0.1-hybrid", device=device)
+    model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-hybrid", device=device)
+    if _PATCH_GEMV:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "kernels"))
+        from patch import patch_zonos_projections
+        n = patch_zonos_projections(model, include_attn=True)
+        print(f"[--patch] swapped {n} projections to CuTe GEMV", flush=True)
+    return model
 
 
 def standard_conditioning(model):
@@ -274,7 +283,10 @@ def cmd_bench(args):
 
 
 def main():
+    global _PATCH_GEMV
     ap = argparse.ArgumentParser(description="Phase 1 streaming pipeline")
+    ap.add_argument("--patch", action="store_true",
+                    help="swap projections to the CuTe GEMV (kernels/patch.py) after load")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("probe")
     sub.add_parser("check-decode")
@@ -283,6 +295,7 @@ def main():
     e.add_argument("--out", default="streaming_e2e.wav")
     sub.add_parser("bench")
     args = ap.parse_args()
+    _PATCH_GEMV = args.patch
     {
         "probe": cmd_probe,
         "check-decode": cmd_check_decode,
