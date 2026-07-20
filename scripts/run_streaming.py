@@ -44,7 +44,8 @@ FULL_RUNS = 6     # full runs per chunk -> inter-chunk latency + RTF
 FRAME_MS = 1000.0 / (44100.0 / 512.0)  # 11.61 ms per-frame realtime budget
 
 
-_PATCH_GEMV = False  # set by --patch: swap projections to the CuTe GEMV after load
+_PATCH_GEMV = False    # set by --patch: swap projections to the CuTe GEMV after load
+_COMPILE_VOC = False   # set by --compile-vocoder: torch.compile the DAC decoder (2.5x eager, free)
 
 
 def load_model():
@@ -55,6 +56,10 @@ def load_model():
         from patch import patch_zonos_projections
         n = patch_zonos_projections(model, include_attn=True)
         print(f"[--patch] swapped {n} projections to CuTe GEMV", flush=True)
+    if _COMPILE_VOC:
+        # dynamic=True: streaming vocode windows vary in length; avoid per-shape recompiles.
+        model.autoencoder.dac.decoder = torch.compile(model.autoencoder.dac.decoder, dynamic=True)
+        print("[--compile-vocoder] torch.compile'd the DAC decoder", flush=True)
     return model
 
 
@@ -283,10 +288,12 @@ def cmd_bench(args):
 
 
 def main():
-    global _PATCH_GEMV
+    global _PATCH_GEMV, _COMPILE_VOC
     ap = argparse.ArgumentParser(description="Phase 1 streaming pipeline")
     ap.add_argument("--patch", action="store_true",
                     help="swap projections to the CuTe GEMV (kernels/patch.py) after load")
+    ap.add_argument("--compile-vocoder", action="store_true",
+                    help="torch.compile the DAC decoder (2.5x eager decode, free)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("probe")
     sub.add_parser("check-decode")
@@ -296,6 +303,7 @@ def main():
     sub.add_parser("bench")
     args = ap.parse_args()
     _PATCH_GEMV = args.patch
+    _COMPILE_VOC = args.compile_vocoder
     {
         "probe": cmd_probe,
         "check-decode": cmd_check_decode,
